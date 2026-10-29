@@ -5,3 +5,4 @@ Pillow>=10,<12
 imageio-ffmpeg>=0.4.9
 edge-tts>=6.1.12,<8
 gTTS>=2.5,<3
+requests>=2.31,<3

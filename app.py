@@ -1,4 +1,4 @@
-import os, re, io, math, wave, asyncio, sqlite3, tempfile, textwrap
+import os, re, io, math, wave, asyncio, sqlite3, tempfile, textwrap, requests
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote_plus
@@ -36,6 +36,33 @@ def lines_fit(draw,text,ft,maxw):
    current=word
  if current: lines.append(current)
  return lines
+
+def fetch_pexels_photo(query, api_key, cache_dir, index):
+ """Fetch a relevant portrait-oriented photo. Returns Pillow image or raises an explicit error."""
+ if not api_key.strip():
+  raise ValueError('A free Pexels API key is needed for automatic real photographs. Add it in the Visuals section, or upload your own photos.')
+ terms=re.sub(r'[^a-zA-Z0-9 ]',' ',query)
+ terms=' '.join(terms.split()[:9]) or 'cinematic landscape'
+ try:
+  response=requests.get('https://api.pexels.com/v1/search',headers={'Authorization':api_key.strip()},params={'query':terms,'per_page':8,'orientation':'portrait'},timeout=20)
+  if response.status_code in (401,403): raise ValueError('Pexels rejected the API key. Please check that you copied the correct key.')
+  response.raise_for_status()
+  items=response.json().get('photos',[])
+  if not items:
+   # Search with broader keywords if a complete sentence has no results.
+   response=requests.get('https://api.pexels.com/v1/search',headers={'Authorization':api_key.strip()},params={'query':' '.join(terms.split()[:3]) or 'nature','per_page':8,'orientation':'portrait'},timeout=20)
+   response.raise_for_status();items=response.json().get('photos',[])
+  if not items: raise ValueError('No matching Pexels photographs found for scene '+str(index+1)+'. Try simpler wording or upload your own photos.')
+  item=items[index%len(items)]
+  url=item.get('src',{}).get('large2x') or item.get('src',{}).get('large')
+  if not url: raise ValueError('Photo service returned no usable image URL.')
+  img_response=requests.get(url,timeout=25)
+  img_response.raise_for_status()
+  if len(img_response.content)>15_000_000: raise ValueError('Downloaded image was too large.')
+  img=Image.open(io.BytesIO(img_response.content));img.load()
+  return img.convert('RGB'),item.get('photographer','Pexels contributor'),item.get('url','')
+ except requests.RequestException as ex:
+  raise RuntimeError('Could not download scene photographs from Pexels: '+str(ex)) from ex
 
 def scene_image(title,caption,index,total,style,theme,photo=None):
  colors={'Ocean':((9,19,52),(15,119,161)),'Sunset':((48,17,58),(245,114,85)),'Forest':((10,40,38),(75,166,122))}
@@ -111,11 +138,11 @@ def music_wav(path,duration):
    samples=(a*envelope*1800).astype('<i2')
    w.writeframes(samples.tobytes())
 
-def make_video(title,script,style,theme,voice,add_music,photos):
+def make_video(title,script,style,theme,voice,add_music,photos,visual_source,pexels_key):
  parts=[p.strip() for p in re.split(r'(?<=[.!?])\s+|\n+',script.strip()) if p.strip()]
  if not parts: raise ValueError('Enter a script first')
  if len(parts)>8: raise ValueError('For free hosting, use up to 8 sentences per video.')
- clips=[]; audios=[]; music=None; combined=None; video=None
+ clips=[]; audios=[]; music=None; combined=None; video=None; credits=[]
  with tempfile.TemporaryDirectory() as tmp:
   td=Path(tmp)
   try:
@@ -125,6 +152,11 @@ def make_video(title,script,style,theme,voice,add_music,photos):
     duration=max(1.5,aud.duration+.35)
     image_path=td/f'scene_{i}.jpg'
     photo=photos[i%len(photos)] if photos else None
+    if visual_source=='Automatic real photographs':
+     photo,creator,photo_url=fetch_pexels_photo(part,pexels_key,td,i)
+     credits.append((creator,photo_url))
+    elif visual_source=='My uploaded photos' and photo is None:
+     raise ValueError('Please upload at least one photograph for this visual mode.')
     scene_image(title,part,i,len(parts),style,theme,photo).save(image_path,quality=90)
     # Small Ken Burns-style motion creates real moving frames from the original art or photo.
     still=ImageClip(str(image_path)).set_duration(duration)
@@ -138,7 +170,7 @@ def make_video(title,script,style,theme,voice,add_music,photos):
     video=video.set_audio(combined)
    path=OUT/f'autocreator_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")}.mp4'
    video.write_videofile(str(path),fps=12,codec='libx264',audio_codec='aac',audio_bitrate='96k',preset='ultrafast',threads=2,logger=None)
-   return path
+   return path, credits
   finally:
    if video: video.close()
    if combined: combined.close()
@@ -147,18 +179,25 @@ def make_video(title,script,style,theme,voice,add_music,photos):
    for a in audios: a.close()
 
 st.set_page_config(page_title='AutoCreator AI v3',page_icon='🎬',layout='centered')
-st.title('🎬 AutoCreator AI · v3')
-st.caption('iPhone-friendly video studio • voice narration • animated visuals • large subtitles')
-st.info('This free-first version animates original procedurally generated artwork or photos you upload. It does NOT create photorealistic AI video footage. Narration needs internet access. Publishing is manual.')
+st.title('🎬 AutoCreator AI · Visuals upgrade')
+st.caption('iPhone-friendly video studio • real scene photos • voice narration • large subtitles')
+st.info('Choose Automatic real photographs to match images to each sentence using Pexels. These are licensed stock photos with animated camera motion, NOT newly AI-generated images or footage. Publishing remains manual.')
 t1,t2,t3,t4=st.tabs(['🎥 Create','📈 Trends','📤 Publishing','📊 Analytics'])
 with t1:
  title=st.text_input('Video title','3 surprising facts')
  script=st.text_area('Script (up to 8 sentences)',value='Your brain stays active even while you sleep. A short walk can help you feel more alert. Small daily habits add up over time.',height=160)
  style=st.radio('Video style',['Faceless storytelling','Cinematic motion'],horizontal=True)
  theme=st.selectbox('Visual theme',['Ocean','Sunset','Forest'])
+ st.subheader('🖼️ Visuals')
+ visual_source=st.radio('Where should scenes come from?',['Automatic real photographs','My uploaded photos','Abstract animated backgrounds'],horizontal=False)
+ pexels_key=''
+ if visual_source=='Automatic real photographs':
+  pexels_key=st.text_input('Pexels API key (free)',value=st.secrets.get('PEXELS_API_KEY','') if 'PEXELS_API_KEY' in st.secrets else '',type='password',help='Get a free API key at pexels.com/api. It is used only for your video generation request.')
+  st.markdown('[Get your free Pexels API key](https://www.pexels.com/api/)')
+  st.caption('Scenes are searched from your script. Photo attribution is displayed after generation; keep credits when publishing.')
  voice=st.selectbox('Narrator',['en-US-AriaNeural','en-US-GuyNeural','en-GB-SoniaNeural'],format_func=lambda v:{'en-US-AriaNeural':'Female · American','en-US-GuyNeural':'Male · American','en-GB-SoniaNeural':'Female · British'}[v])
  add_music=st.checkbox('Add original ambient background music',value=True)
- uploads=st.file_uploader('Optional: upload your own JPG/PNG photos for cinematic scenes',type=['jpg','jpeg','png'],accept_multiple_files=True)
+ uploads=st.file_uploader('Optional: upload your own JPG/PNG photos (used in My uploaded photos mode)',type=['jpg','jpeg','png'],accept_multiple_files=True)
  photos=[]
  for up in (uploads or [])[:8]:
   try:
@@ -169,13 +208,18 @@ with t1:
  if st.button('🎬 Generate video with voice',type='primary',use_container_width=True):
   try:
    with st.spinner('Creating narration, scenes and MP4. Free cloud rendering can take several minutes...'):
-    path=make_video(title,script,style,theme,voice,add_music,photos)
+    path,credits=make_video(title,script,style,theme,voice,add_music,photos,visual_source,pexels_key)
+    st.session_state['last_credits']=credits
     c=db();c.execute('INSERT INTO videos(title,script,filepath,created) VALUES (?,?,?,?)',(title,script,str(path),datetime.now().isoformat(timespec='seconds')));c.commit();c.close()
     st.session_state['last_video']=str(path)
    st.success('Your narrated MP4 is ready!')
   except Exception as e: st.error(f'Could not generate video: {e}')
  if st.session_state.get('last_video') and Path(st.session_state['last_video']).exists():
   p=Path(st.session_state['last_video']);st.video(str(p));st.download_button('⬇️ Download MP4 to iPhone',p.read_bytes(),file_name=p.name,mime='video/mp4',use_container_width=True)
+  if st.session_state.get('last_credits'):
+   with st.expander('Photo credits — include when publishing'):
+    for creator,url in st.session_state['last_credits']:
+     st.write(f'Photo by {creator}: {url}')
  st.caption('Tip: start with 2–3 short sentences. Download immediately: free hosting may erase files after restart.')
 with t2:
  st.subheader('Explore public trends')
