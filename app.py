@@ -5,6 +5,9 @@ from urllib.parse import quote_plus
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+# Compatibility for MoviePy 1.x with Pillow 10 and newer.
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips, CompositeAudioClip
 
 ROOT=Path(__file__).parent
